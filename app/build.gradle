@@ -1,0 +1,48 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.sr3launcher'
+    compileSdk 34
+    buildFeatures { buildConfig true }
+    flavorDimensions 'game'
+    productFlavors {
+        sr3 {
+            dimension 'game'
+            applicationId 'com.sr3.launcher'
+            buildConfigField 'String', 'GAME', '"sr3"'
+            manifestPlaceholders = [appLabel: 'SR3 Лаунчер', gamePkg: 'com.feralinteractive.saintsrow3_android']
+        }
+        tr {
+            dimension 'game'
+            applicationId 'com.sr3.launcher.tombraider'
+            buildConfigField 'String', 'GAME', '"tr"'
+            manifestPlaceholders = [appLabel: 'Tomb Raider Лаунчер', gamePkg: 'com.feralinteractive.tombraider_android']
+        }
+        hm {
+            dimension 'game'
+            applicationId 'com.sr3.launcher.hitman'
+            buildConfigField 'String', 'GAME', '"hm"'
+            manifestPlaceholders = [appLabel: 'Hitman Лаунчер', gamePkg: 'com.feralinteractive.hitmanabsolution_android']
+        }
+    }
+    defaultConfig {
+        minSdk 30
+        targetSdk 34
+        versionCode 3
+        versionName '1.2'
+    }
+    buildTypes { release { minifyEnabled false } }
+    lint { checkReleaseBuilds false; abortOnError false }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    // Своя подпись: положите ../launcher.jks и задайте KS_PASS. Иначе релиз подписывается отладочным ключом.
+    def ksFile = file('../launcher.jks')
+    if (ksFile.exists()) {
+        signingConfigs { rel { storeFile ksFile; storePassword System.getenv('KS_PASS'); keyAlias 'launcher'; keyPassword System.getenv('KS_PASS') } }
+        buildTypes.release.signingConfig = signingConfigs.rel
+    } else {
+        buildTypes.release.signingConfig = signingConfigs.debug
+    }
+}
+dependencies {
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+}
