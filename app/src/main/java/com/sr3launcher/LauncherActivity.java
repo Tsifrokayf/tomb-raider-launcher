@@ -198,6 +198,7 @@ public class LauncherActivity extends Activity {
         onoff("EnableShaderDeduplicator", "Дедупликация шейдеров", "Меньше шейдеров в кэше", D3D_CONFIG, 1),
         onoff("EnableF3DWarmer", "Прогрев шейдеров", "Прогревает кэш, меньше подлагов в начале", D3D_CONFIG, 1),
         onoff("SingleThreadedWarmer", "Прогрев в одном потоке", "Выкл. быстрее прогревает, но грузит все ядра", D3D_CONFIG, 1),
+        onoff("UseFileBackedMemory", "Файловая память игры", "Часть памяти игры берётся из файла на диске. Если игра вылетает в меню с «menu buffer mapping», выключите", join(SETUP, "MemoryFlags"), 0),
     };
     private final Ex[] exCtl = new Ex[] {
         onoff("VcpEnableGyroControls", "Гироскоп для прицела", "Прицеливание наклоном телефона", GO, 0),
@@ -391,6 +392,7 @@ public class LauncherActivity extends Activity {
     /** Пересчитывает шаги первичной настройки и прячет карточку, когда всё готово. */
     private void refreshSetup() {
         if (setupBody == null) return;
+        perfRefresh();
         setupBody.removeAllViews();
         boolean shInst = pkgInstalled(SHIZUKU_PKG);
         boolean running = Fs.running();
@@ -581,6 +583,7 @@ public class LauncherActivity extends Activity {
         getWindow().setNavigationBarColor(BG);
         if (!SR3) initOtherSpecs();
         buildUi();
+        checkUpdate(true);
         loadFromFile();
         refreshSetup();
     }
@@ -837,6 +840,8 @@ public class LauncherActivity extends Activity {
         } else {
             buildOtherBody(left, right);
         }
+        buildUpdateCard(left);
+        buildPerfCard(right);
 
         // нижняя панель
         LinearLayout bar = new LinearLayout(this);
@@ -860,6 +865,303 @@ public class LauncherActivity extends Activity {
         play.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { play(); } });
 
         setContentView(root);
+    }
+
+    // ---------------------------------------------------------------- обновления
+
+    private TextView updInfo;
+    private Button updBtn;
+    private Updater.Release updRel;
+    private boolean updBusy;
+
+    private void buildUpdateCard(LinearLayout parent) {
+        LinearLayout c = card(parent, "Обновления");
+        updInfo = text("Установлена версия " + BuildConfig.VERSION_NAME + ". Новые версии берутся из GitHub Releases.", 12, MUTED, false);
+        c.addView(updInfo);
+        updBtn = button("Проверить обновления", false);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-2, -2);
+        bp.topMargin = dp(8);
+        c.addView(updBtn, bp);
+        updBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (updRel != null && updRel.apkUrl.length() > 0 && Updater.newer(updRel.tag, BuildConfig.VERSION_NAME)) downloadUpdate();
+                else checkUpdate(false);
+            }
+        });
+        TextView link = text("Страница релизов на GitHub", 12, ACCENT, false);
+        link.setPadding(0, dp(8), 0, 0);
+        link.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/Tsifrokayf/" + BuildConfig.REPO + "/releases")));
+            }
+        });
+        c.addView(link);
+    }
+
+    /** silent: при запуске ничего не показываем, если обновлений нет или нет сети. */
+    private void checkUpdate(final boolean silent) {
+        if (updBusy || updInfo == null) return;
+        updBusy = true;
+        if (!silent) updInfo.setText("Проверяю…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                Updater.Release r = null;
+                String err = null;
+                try { r = Updater.latest(BuildConfig.REPO); } catch (Exception e) { err = e.getMessage() == null ? e.toString() : e.getMessage(); }
+                final Updater.Release rel = r;
+                final String error = err;
+                handler.post(new Runnable() {
+                    @Override public void run() {
+                        updBusy = false;
+                        if (rel == null) {
+                            if (!silent) updInfo.setText("Не удалось проверить: " + error);
+                            return;
+                        }
+                        updRel = rel;
+                        if (Updater.newer(rel.tag, BuildConfig.VERSION_NAME)) {
+                            String n = rel.notes.trim();
+                            if (n.length() > 300) n = n.substring(0, 300) + "…";
+                            updInfo.setText("Доступна версия " + rel.tag + " (у вас " + BuildConfig.VERSION_NAME + ")." + (n.length() > 0 ? "\n" + n : "")
+                                + (rel.apkUrl.length() == 0 ? "\nВ релизе нет APK, откройте страницу релизов." : ""));
+                            if (rel.apkUrl.length() > 0) updBtn.setText("Скачать и установить " + rel.tag);
+                            say("Доступно обновление лаунчера: " + rel.tag);
+                        } else if (!silent) {
+                            updInfo.setText("У вас последняя версия (" + BuildConfig.VERSION_NAME + "). На GitHub: " + rel.tag + ".");
+                        }
+                    }
+                });
+            }
+        }, "update-check").start();
+    }
+
+    private void downloadUpdate() {
+        if (updBusy || updRel == null) return;
+        updBusy = true;
+        updBtn.setEnabled(false);
+        updInfo.setText("Скачиваю " + updRel.tag + "…");
+        final String url = updRel.apkUrl;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String err = null;
+                try {
+                    Updater.download(url, ApkProvider.apk(LauncherActivity.this).getParentFile(), new Updater.Progress() {
+                        @Override public void onProgress(final int pct) {
+                            handler.post(new Runnable() { @Override public void run() { updInfo.setText("Скачиваю… " + pct + "%"); } });
+                        }
+                    });
+                } catch (Exception e) { err = e.getMessage() == null ? e.toString() : e.getMessage(); }
+                final String error = err;
+                handler.post(new Runnable() {
+                    @Override public void run() {
+                        updBusy = false;
+                        updBtn.setEnabled(true);
+                        if (error != null) { updInfo.setText("Не удалось скачать: " + error); return; }
+                        installUpdate();
+                    }
+                });
+            }
+        }, "update-download").start();
+    }
+
+    private void installUpdate() {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            updInfo.setText("Разрешите этому приложению установку обновлений в открывшемся окне и снова нажмите кнопку.");
+            try {
+                startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, android.net.Uri.parse("package:" + getPackageName())));
+            } catch (Exception ignored) { }
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(ApkProvider.uri(this), "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            updInfo.setText("Файл скачан, подтвердите установку в окне системы.");
+        } catch (Exception e) {
+            updInfo.setText("Не удалось открыть установщик: " + e.getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------- производительность (root)
+
+    private Spinner perfCore, perfPrio, perfZram, perfSwp;
+    private TextView perfInfo;
+    private Perf.Info perfI;
+    private boolean perfLoading;
+    private List<String[]> perfCoreOpts = new ArrayList<String[]>();
+    private static final String[] ZRAM_LABELS = {"Не менять", "2 ГБ", "3 ГБ", "4 ГБ", "6 ГБ", "8 ГБ"};
+    private static final long[] ZRAM_GB = {0, 2, 3, 4, 6, 8};
+    private static final String[] SWP_LABELS = {"Не менять", "20", "60", "100", "150", "190"};
+    private static final int[] SWP_VAL = {-1, 20, 60, 100, 150, 190};
+
+    private void perfRow(LinearLayout c, String title, String hint, Spinner sp) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout names = new LinearLayout(this);
+        names.setOrientation(LinearLayout.VERTICAL);
+        names.addView(text(title, 15, TEXT, false));
+        if (hint.length() > 0) names.addView(text(hint, 11, MUTED, false));
+        row.addView(names, new LinearLayout.LayoutParams(0, -2, 1f));
+        row.addView(sp, new LinearLayout.LayoutParams(dp(190), -2));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2);
+        rp.topMargin = dp(8);
+        c.addView(row, rp);
+    }
+
+    private void buildPerfCard(LinearLayout parent) {
+        LinearLayout c = card(parent, "Производительность (нужен root)");
+        perfInfo = text("Нужен root: выдайте его лаунчеру в карточке «Первичная настройка».", 12, MUTED, false);
+        c.addView(perfInfo);
+        perfCore = new Spinner(this); perfPrio = new Spinner(this); perfZram = new Spinner(this); perfSwp = new Spinner(this);
+        List<String> l0 = new ArrayList<String>();
+        l0.add("Все ядра (не менять)");
+        fillSpinner(perfCore, l0, 0);
+        perfRow(c, "Ядра для игры", "Привязка потоков игры к ядрам. Применяется при запуске", perfCore);
+        List<String> pr = new ArrayList<String>();
+        for (String x : Perf.PRIO_LABELS) pr.add(x);
+        fillSpinner(perfPrio, pr, launcherPrefs.getInt("perf_prio", 0));
+        perfRow(c, "Приоритет игры", "Планировщику важнее потоки игры. Применяется при запуске", perfPrio);
+        List<String> zl = new ArrayList<String>();
+        for (String x : ZRAM_LABELS) zl.add(x);
+        fillSpinner(perfZram, zl, 0);
+        perfRow(c, "Размер подкачки (zram)", "Сжатая подкачка в ОЗУ. Действует до перезагрузки", perfZram);
+        List<String> sl = new ArrayList<String>();
+        for (String x : SWP_LABELS) sl.add(x);
+        fillSpinner(perfSwp, sl, 0);
+        perfRow(c, "Склонность к подкачке (swappiness)", "Больше: система охотнее выгружает память в подкачку", perfSwp);
+
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        Button apply = button("Применить подкачку", false);
+        Button undo = button("Вернуть подкачку", false);
+        Button now = button("Ядра и приоритет — к запущенной игре", false);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(0, -2, 1f);
+        bp.rightMargin = dp(6);
+        btns.addView(apply, bp);
+        btns.addView(undo, new LinearLayout.LayoutParams(0, -2, 1f));
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, -2);
+        tp.topMargin = dp(10);
+        c.addView(btns, tp);
+        c.addView(now, tp);
+        c.addView(text("Настройки ядер и приоритета запоминаются и применяются при каждом запуске игры из лаунчера. Подкачка меняется сразу, после перезагрузки телефона возвращается как была.", 11, MUTED, false));
+
+        apply.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { perfApplySwap(false); } });
+        undo.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { perfApplySwap(true); } });
+        now.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { perfApplyNow(); } });
+        if (Fs.rootOk()) perfRefresh();
+    }
+
+    private void perfRefresh() {
+        if (perfInfo == null || perfLoading || perfI != null || !Fs.rootOk()) return;
+        perfLoading = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final Perf.Info in = Perf.read();
+                handler.post(new Runnable() {
+                    @Override public void run() {
+                        perfLoading = false;
+                        if (!in.ok) { perfInfo.setText("Не удалось прочитать данные системы через root."); return; }
+                        perfI = in;
+                        perfInfo.setText(in.describe());
+                        perfCoreOpts = Perf.coreOptions(in);
+                        List<String> labels = new ArrayList<String>();
+                        int sel = 0;
+                        String saved = launcherPrefs.getString("perf_core", "all");
+                        for (int i = 0; i < perfCoreOpts.size(); i++) {
+                            labels.add(perfCoreOpts.get(i)[1]);
+                            if (perfCoreOpts.get(i)[0].equals(saved)) sel = i;
+                        }
+                        fillSpinner(perfCore, labels, sel);
+                    }
+                });
+            }
+        }, "perf-read").start();
+    }
+
+    private String perfCoreKey() {
+        int i = perfCore.getSelectedItemPosition();
+        return i >= 0 && i < perfCoreOpts.size() ? perfCoreOpts.get(i)[0] : "all";
+    }
+
+    private void perfSavePrefs() {
+        launcherPrefs.edit().putString("perf_core", perfCoreKey()).putInt("perf_prio", Math.max(0, perfPrio.getSelectedItemPosition())).apply();
+    }
+
+    /** Запускает фоновый скрипт root, он дождётся процесса игры и применит ядра и приоритет. */
+    private void perfScheduleForLaunch() {
+        perfSavePrefs();
+        if (!Fs.rootOk() || perfI == null) return;
+        String mask = Perf.mask(perfI, perfCoreKey());
+        int nice = Perf.PRIO_NICE[Math.max(0, Math.min(Perf.PRIO_NICE.length - 1, perfPrio.getSelectedItemPosition()))];
+        if (mask == null && nice == 0) return;
+        Fs.suDetached(Perf.script(PKG, mask, nice, 90, 12, false));
+    }
+
+    private void perfApplyNow() {
+        if (!Fs.rootOk()) { say("Нужен root"); return; }
+        if (perfI == null) { say("Данные о ядрах ещё не прочитаны"); return; }
+        perfSavePrefs();
+        final String mask = Perf.mask(perfI, perfCoreKey());
+        final int nice = Perf.PRIO_NICE[Math.max(0, Math.min(Perf.PRIO_NICE.length - 1, perfPrio.getSelectedItemPosition()))];
+        if (mask == null && nice == 0) { say("Выберите ядра или приоритет, отличные от значений по умолчанию"); return; }
+        say("Применяю к запущенной игре…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String out = Fs.suOut(Perf.script(PKG, mask, nice, 2, 1, true));
+                final String msg = out == null ? "Не удалось выполнить через root"
+                    : out.contains("NOPID") ? "Игра не запущена: запустите её и нажмите снова" : out.trim();
+                handler.post(new Runnable() { @Override public void run() { say(msg); } });
+            }
+        }, "perf-now").start();
+    }
+
+    private void perfApplySwap(final boolean undo) {
+        if (!Fs.rootOk()) { say("Нужен root"); return; }
+        if (perfI == null) { say("Данные системы ещё не прочитаны"); return; }
+        final int zi = Math.max(0, perfZram.getSelectedItemPosition());
+        final int si = Math.max(0, perfSwp.getSelectedItemPosition());
+        if (!undo && zi == 0 && si == 0) { say("Выберите размер подкачки или swappiness"); return; }
+        // исходные значения запоминаем один раз, до первого изменения
+        if (!launcherPrefs.contains("orig_zram")) {
+            launcherPrefs.edit().putLong("orig_zram", perfI.zramBytes).putInt("orig_swp", perfI.swappiness).apply();
+        }
+        final long origZ = launcherPrefs.getLong("orig_zram", perfI.zramBytes);
+        final int origS = launcherPrefs.getInt("orig_swp", perfI.swappiness);
+        say(undo ? "Возвращаю подкачку…" : "Меняю подкачку…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                StringBuilder res = new StringBuilder();
+                Perf.Info cur = Perf.read();
+                long wantZ = undo ? origZ : ZRAM_GB[zi] * 1073741824L;
+                if (wantZ > 0 && wantZ != cur.zramBytes && cur.zramBytes > 0) {
+                    long used = cur.swapTotalKb - cur.swapFreeKb;
+                    if (cur.memAvailKb < used + 400L * 1024) {
+                        res.append("Мало свободной памяти, чтобы пересоздать подкачку (занято ").append(used / 1024).append(" МБ). Закройте приложения и повторите. ");
+                        wantZ = 0;
+                    } else {
+                        String out = Fs.suOut(Perf.swapScript(wantZ, cur.zramBytes));
+                        res.append(out != null && out.contains("OK") ? "Подкачка: " + String.format(java.util.Locale.US, "%.1f", wantZ / 1073741824.0) + " ГБ. "
+                            : out != null && out.contains("NOZRAM") ? "На этом устройстве нет zram0. "
+                            : out != null && out.contains("NOSWAPOFF") ? "Не удалось отключить подкачку. "
+                            : "Не удалось сменить размер, прежний возвращён. ");
+                    }
+                }
+                int wantS = undo ? origS : SWP_VAL[si];
+                if (wantS >= 0) {
+                    Fs.suOut("echo " + wantS + " > /proc/sys/vm/swappiness");
+                    res.append("swappiness ").append(wantS).append(". ");
+                }
+                final Perf.Info after = Perf.read();
+                final String msg = res.toString().trim();
+                handler.post(new Runnable() {
+                    @Override public void run() {
+                        if (after.ok) { perfI = after; perfInfo.setText(after.describe()); }
+                        say(msg);
+                    }
+                });
+            }
+        }, "perf-swap").start();
     }
 
     private boolean noAccessShown;
@@ -1232,6 +1534,7 @@ public class LauncherActivity extends Activity {
                 sw("EnableIdxD3D11Threaded", "Многопоточный рендер", "Может поднять FPS, на некоторых GPU вызывает сбои", D3D_CONFIG, 0, 1),
                 ex("IdxD3D11ThreadedMaxQueuedFrames", "Очередь кадров", "0: минимум задержки, больше: плавнее, но с задержкой управления", D3D_CONFIG, 0, "integer", 0, "0|0", "1|1", "2|2", "3|3"),
                 sw("VulkanUseSeparateSubmitThread", "Отдельный поток отправки (Vulkan)", "Разгружает главный поток", D3D_CONFIG, 0, 1),
+                sw("UseFileBackedMemory", "Файловая память игры", "Часть памяти игры берётся из файла на диске. Если игра вылетает с «buffer mapping», выключите", join(SETUP, "MemoryFlags"), 0, 0),
                 sw("VulkanUseSecondaryCmdBuffersForGraphicsPass", "Вторичные буферы команд (Vulkan)", "Экспериментально, по умолчанию выкл.", D3D_CONFIG, 0, 0),
                 sw("EnableShaderDeduplicator", "Дедупликация шейдеров", "Меньше шейдеров в кэше", D3D_CONFIG, 0, 1),
                 sw("EnableF3DWarmer", "Прогрев шейдеров", "Меньше подлагов в начале", D3D_CONFIG, 0, 1),
@@ -1307,6 +1610,7 @@ public class LauncherActivity extends Activity {
             oEngine = new Ex[] {
                 sw("EnableIdxD3D11Threaded", "Многопоточный рендер", "Может поднять FPS, на некоторых GPU вызывает сбои", D3D_CONFIG, 0, 1),
                 sw("VulkanUseSeparateSubmitThread", "Отдельный поток отправки (Vulkan)", "Разгружает главный поток", D3D_CONFIG, 0, 1),
+                sw("UseFileBackedMemory", "Файловая память игры", "Часть памяти игры берётся из файла на диске. Если игра вылетает с «buffer mapping», выключите", join(SETUP, "MemoryFlags"), 0, 0),
                 sw("LazyShaderCreation", "Ленивое создание шейдеров", "", D3D_CONFIG, 0, 1),
                 sw("EnableF3DWarmer", "Прогрев шейдеров", "Меньше подлагов в начале", D3D_CONFIG, 0, 1),
                 sw("EnableShaderDeduplicator", "Дедупликация шейдеров", "", D3D_CONFIG, 0, 1),
@@ -1682,6 +1986,7 @@ public class LauncherActivity extends Activity {
     private void play() {
         if (Fs.exists(prefPath) && !applyToFile()) return;
         Fs.sh("am force-stop " + PKG);
+        perfScheduleForLaunch();
         say("Запуск игры…");
         handler.postDelayed(new Runnable() {
             @Override public void run() {
